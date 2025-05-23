@@ -1,166 +1,139 @@
-| Supported Targets | ESP32 | ESP32-S3 |
-| ----------------- | ----- | -------- |
+# ESP32-S3 SD卡读写速度测试
 
-# SD Card example (SDMMC)
+这个项目使用ESP32-S3的SDMMC外设测试SD卡的读写速度。项目基于ESP-IDF框架开发，支持标准SD卡和SDHC/SDXC卡。
 
-(See the README.md file in the upper level 'examples' directory for more information about examples.)
+## 功能特点
 
-This example demonstrates how to use an SD card with an ESP device. Example does the following steps:
+- SD卡初始化和FAT文件系统挂载
+- 基本文件操作演示（创建、写入、重命名、读取）
+- 支持1线和4线SD卡通信模式
+- SD卡读写速度测试（可配置测试文件大小）
+- 详细的错误处理和日志输出
 
-1. Use an "all-in-one" `esp_vfs_fat_sdmmc_mount` function to:
-    - initialize SDMMC peripheral,
-    - probe and initialize an SD card,
-    - mount FAT filesystem using FATFS library (and format card, if the filesystem cannot be mounted),
-    - register FAT filesystem in VFS, enabling C standard library and POSIX functions to be used.
-2. Print information about the card, such as name, type, capacity, and maximum supported frequency.
-3. Create a file using `fopen` and write to it using `fprintf`.
-4. Rename the file. Before renaming, check if destination file already exists using `stat` function, and remove it using `unlink` function.
-5. Open renamed file for reading, read back the line, and print it to the terminal.
+## 硬件要求
 
-This example supports SD (SDSC, SDHC, SDXC) cards and eMMC chips.
+- ESP32-S3开发板
+- SD卡（支持标准SD卡、SDHC和SDXC）
+- SD卡槽或SD卡转接板
+- 10K上拉电阻（建议在所有SD卡信号线上使用）
 
-## Hardware
+## 引脚连接
 
-This example requires an ESP32 or ESP32-S3 development board with an SD card slot and an SD card.
+| SD卡引脚 | ESP32-S3引脚 | 说明 |
+|---------|-------------|------|
+| CLK     | GPIO36      | 时钟信号 |
+| CMD     | GPIO35      | 命令信号 |
+| D0      | GPIO37      | 数据线0 |
+| D1      | GPIO38      | 数据线1（4线模式） |
+| D2      | GPIO33      | 数据线2（4线模式） |
+| D3      | GPIO34      | 数据线3（4线模式） |
 
-Although it is possible to connect an SD card breakout adapter, keep in mind that connections using breakout cables are often unreliable and have poor signal integrity. You may need to use lower clock frequency when working with SD card breakout adapters.
+注意：以上引脚分配可以在menuconfig中修改。
 
-This example doesn't utilize card detect (CD) and write protect (WP) signals from SD card slot.
+## 快速开始
 
-### Pin assignments for ESP32
+### 编译和烧录
 
-On ESP32, SDMMC peripheral is connected to specific GPIO pins using the IO MUX. GPIO pins cannot be customized. Please see the table below for the pin connections.
+1. 安装ESP-IDF（推荐v4.4.4或更新版本）
+2. 克隆仓库并进入项目目录
+3. 配置项目：
+   ```bash
+   idf.py menuconfig
+   ```
+   在 `Example Configuration` 菜单中：
+   - 设置SD卡的GPIO引脚
+   - 选择1线或4线模式
+   - 配置是否在挂载失败时格式化SD卡
 
-When using an ESP-WROVER-KIT board, this example runs without any extra modifications required. Only an SD card needs to be inserted into the slot.
+4. 编译和烧录：
+   ```bash
+   idf.py build flash monitor
+   ```
 
-ESP32 pin     | SD card pin | Notes
---------------|-------------|------------
-GPIO14 (MTMS) | CLK         | 10k pullup in SD mode
-GPIO15 (MTDO) | CMD         | 10k pullup in SD mode
-GPIO2         | D0          | 10k pullup in SD mode, pull low to go into download mode (see Note about GPIO2 below!)
-GPIO4         | D1          | not used in 1-line SD mode; 10k pullup in 4-line SD mode
-GPIO12 (MTDI) | D2          | not used in 1-line SD mode; 10k pullup in 4-line SD mode (see Note about GPIO12 below!)
-GPIO13 (MTCK) | D3          | not used in 1-line SD mode, but card's D3 pin must have a 10k pullup
-
-
-### Pin assignments for ESP32-S3
-
-On ESP32-S3, SDMMC peripheral is connected to GPIO pins using GPIO matrix. This allows arbitrary GPIOs to be used to connect an SD card. In this example, GPIOs can be configured in two ways:
-
-1. Using menuconfig: Run `idf.py menuconfig` in the project directory and open "SD/MMC Example Configuration" menu.
-2. In the source code: See the initialization of ``sdmmc_slot_config_t slot_config`` structure in the example code.
-
-The table below lists the default pin assignments.
-
-When using an ESP32-S3-USB-OTG board, this example runs without any extra modifications required. Only an SD card needs to be inserted into the slot.
-
-ESP32-S3 pin  | SD card pin | Notes
---------------|-------------|------------
-GPIO36        | CLK         | 10k pullup
-GPIO35        | CMD         | 10k pullup
-GPIO37        | D0          | 10k pullup
-GPIO38        | D1          | not used in 1-line SD mode; 10k pullup in 4-line mode
-GPIO33        | D2          | not used in 1-line SD mode; 10k pullup in 4-line mode
-GPIO34        | D3          | not used in 1-line SD mode, but card's D3 pin must have a 10k pullup
-
-### 4-line and 1-line SD modes
-
-By default, this example uses 4 line SD mode, utilizing 6 pins: CLK, CMD, D0 - D3. It is possible to use 1-line mode (CLK, CMD, D0) by changing "SD/MMC bus width" in the example configuration menu (see `CONFIG_EXAMPLE_SDMMC_BUS_WIDTH_1`).
-
-Note that even if card's D3 line is not connected to the ESP chip, it still has to be pulled up, otherwise the card will go into SPI protocol mode.
-
-### Note about GPIO2 (ESP32 only)
-
-GPIO2 pin is used as a bootstrapping pin, and should be low to enter UART download mode. One way to do this is to connect GPIO0 and GPIO2 using a jumper, and then the auto-reset circuit on most development boards will pull GPIO2 low along with GPIO0, when entering download mode.
-
-- Some boards have pulldown and/or LED on GPIO2. LED is usually ok, but pulldown will interfere with D0 signals and must be removed. Check the schematic of your development board for anything connected to GPIO2.
-
-### Note about GPIO12 (ESP32 only)
-
-GPIO12 is used as a bootstrapping pin to select output voltage of an internal regulator which powers the flash chip (VDD_SDIO). This pin has an internal pulldown so if left unconnected it will read low at reset (selecting default 3.3V operation). When adding a pullup to this pin for SD card operation, consider the following:
-
-- For boards which don't use the internal regulator (VDD_SDIO) to power the flash, GPIO12 can be pulled high.
-- For boards which use 1.8V flash chip, GPIO12 needs to be pulled high at reset. This is fully compatible with SD card operation.
-- On boards which use the internal regulator and a 3.3V flash chip, GPIO12 must be low at reset. This is incompatible with SD card operation.
-    * In most cases, external pullup can be omitted and an internal pullup can be enabled using a `gpio_pullup_en(GPIO_NUM_12);` call. Most SD cards work fine when an internal pullup on GPIO12 line is enabled. Note that if ESP32 experiences a power-on reset while the SD card is sending data, high level on GPIO12 can be latched into the bootstrapping register, and ESP32 will enter a boot loop until external reset with correct GPIO12 level is applied.
-    * Another option is to burn the flash voltage selection efuses. This will permanently select 3.3V output voltage for the internal regulator, and GPIO12 will not be used as a bootstrapping pin. Then it is safe to connect a pullup resistor to GPIO12. This option is suggested for production use.
-
-The following command can be used to program flash voltage selection efuses **to 3.3V**:
-
-```sh
-    components/esptool_py/esptool/espefuse.py set_flash_voltage 3.3V
-```
-
-This command will burn the `XPD_SDIO_TIEH`, `XPD_SDIO_FORCE`, and `XPD_SDIO_REG` efuses. With all three burned to value 1, the internal VDD_SDIO flash voltage regulator is permanently enabled at 3.3V. See the technical reference manual for more details.
-
-`espefuse.py` has a `--do-not-confirm` option if running from an automated flashing script.
-
-See [the document about pullup requirements](https://docs.espressif.com/projects/esp-idf/en/latest/api-reference/peripherals/sd_pullup_requirements.html) for more details about pullup support and compatibility of modules and development boards.
-
-## How to use example
-
-### Build and flash
-
-Build the project and flash it to the board, then run monitor tool to view serial output:
+### 测试结果示例
 
 ```
-idf.py -p PORT flash monitor
-```
-
-(Replace PORT with serial port name.)
-
-(To exit the serial monitor, type ``Ctrl-]``.)
-
-See the Getting Started Guide for full steps to configure and use ESP-IDF to build projects.
-
-
-## Example output
-
-Here is an example console output. In this case a 128MB SDSC card was connected, and `EXAMPLE_FORMAT_IF_MOUNT_FAILED` menuconfig option enabled. Card was unformatted, so the initial mount has failed. Card was then partitioned, formatted, and mounted again.
-
-```
-I (336) example: Initializing SD card
-I (336) example: Using SDMMC peripheral
-I (336) gpio: GPIO[13]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
-W (596) vfs_fat_sdmmc: failed to mount card (13)
-W (596) vfs_fat_sdmmc: partitioning card
-W (596) vfs_fat_sdmmc: formatting card, allocation unit size=16384
-W (7386) vfs_fat_sdmmc: mounting again
-Name: XA0E5
+I (407) example: Filesystem mounted
+Name: SD16G
 Type: SDHC/SDXC
 Speed: 20 MHz
-Size: 61068MB
-I (7386) example: Opening file /sdcard/hello.txt
-I (7396) example: File written
-I (7396) example: Renaming file /sdcard/hello.txt to /sdcard/foo.txt
-I (7396) example: Reading file /sdcard/foo.txt
-I (7396) example: Read from file: 'Hello XA0E5!'
-I (7396) example: Card unmounted
+Size: 3840MB
+I (957) example: Write speed: 1.72 MB/s (0.07 seconds for 131072 bytes)
+I (1037) example: Read speed: 0.51 MB/s (0.25 seconds for 131072 bytes)
 ```
 
-## Troubleshooting
+## 配置说明
 
-### Failure to download the example
+### 主要配置参数
 
+在 `main/sd_card_example_main.c` 中：
+```c
+// 缓冲区和文件大小配置
+#define TEST_BUFFER_SIZE (32 * 1024)     // 每次读写的缓冲区大小：32KB
+#define TEST_FILE_SIZE (1024 * 1024)     // 测试文件总大小：1MB
 ```
-Connecting........_____....._____....._____....._____....._____....._____....._____
 
-A fatal error occurred: Failed to connect to Espressif device: Invalid head of packet (0x34)
-```
+### Menuconfig选项
 
-Disconnect the SD card D0/MISO line from GPIO2 and try uploading again. Read "Note about GPIO2" above.
+- `Example Configuration`
+  - `Format the card if mount failed` - 挂载失败时是否格式化
+  - `SD/MMC bus width` - 选择1线或4线模式
+  - `CLK GPIO number` - 时钟信号引脚
+  - `CMD GPIO number` - 命令信号引脚
+  - `D0 GPIO number` - 数据线0引脚
+  - `D1 GPIO number` - 数据线1引脚（4线模式）
+  - `D2 GPIO number` - 数据线2引脚（4线模式）
+  - `D3 GPIO number` - 数据线3引脚（4线模式）
 
-### Card fails to initialize with `sdmmc_init_sd_scr: send_scr (1) returned 0x107` error
+## 故障排除
 
-Check connections between the card and the ESP32. For example, if you have disconnected GPIO2 to work around the flashing issue, connect it back and reset the ESP32 (using a button on the development board, or by pressing Ctrl-T Ctrl-R in IDF Monitor).
+### 常见问题及解决方法
 
-### Card fails to initialize with `sdmmc_check_scr: send_scr returned 0xffffffff` error
+1. 文件操作失败 (errno: 22)
+   - 原因：之前使用二进制模式打开文件导致兼容性问题
+   - 解决：使用文本模式打开文件（"w"/"r"），已在代码中修复
 
-Connections between the card and the ESP32 are too long for the frequency used. Try using shorter connections, or try reducing the clock speed of SD interface.
+2. SD卡初始化失败
+   - 检查SD卡是否正确插入
+   - 确认所有信号线上有10K上拉电阻
+   - 验证GPIO配置是否正确
 
-### Failure to mount filesystem
+3. 速度测试性能优化
+   - 使用4线模式可显著提高传输速度
+   - 增大TEST_BUFFER_SIZE可提高大文件传输效率
+   - 确保电源供应稳定，建议使用外部3.3V供电
 
-```
-example: Failed to mount filesystem. If you want the card to be formatted, set the EXAMPLE_FORMAT_IF_MOUNT_FAILED menuconfig option.
-```
-The example will be able to mount only cards formatted using FAT32 filesystem. If the card is formatted as exFAT or some other filesystem, you have an option to format it in the example code. Enable the `EXAMPLE_FORMAT_IF_MOUNT_FAILED` menuconfig option, then build and flash the example.
+### 调试方法
+
+1. 查看详细日志：
+   ```bash
+   idf.py monitor
+   ```
+
+2. 检查SD卡信息：
+   程序会自动打印SD卡的详细信息，包括：
+   - 卡名称和类型
+   - 通信速度
+   - 容量大小
+
+## 已知限制
+
+- 文件大小限制：建议不要超过1MB，以避免内存问题
+- SD卡兼容性：某些低速卡可能需要降低通信速度
+- GPIO限制：部分GPIO不适合用作SD卡接口，请参考硬件指南
+
+## 后续改进计划
+
+1. 添加更多测试模式：
+   - 随机读写测试
+   - 多文件并发测试
+   - 长时间稳定性测试
+
+2. 性能优化：
+   - DMA传输支持
+   - 缓存优化
+   - 多线程支持
+
+## 许可证
+
+本项目代码属于公共领域（或根据您的选择使用CC0许可）。

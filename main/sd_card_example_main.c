@@ -1,11 +1,26 @@
-/* SD卡和FAT文件系统示例
-   本示例代码属于公共领域（或根据您的选择使用CC0许可）。
+/*
+ * ESP32-S3 SD卡读写速度测试示例
+ *
+ * 本示例演示了如何在ESP32-S3上使用SDMMC外设读写SD卡，并测试读写速度。
+ * 主要功能：
+ * 1. SD卡初始化和FAT文件系统挂载
+ * 2. 基本文件操作（创建、写入、重命名、读取）
+ * 3. SD卡读写速度测试（可配置测试文件大小和缓冲区大小）
+ *
+ * 注意事项：
+ * - 请确保SD卡已正确插入
+ * - 需要在menuconfig中正确配置SD卡的GPIO引脚
+ * - 建议在SD卡信号线上添加10K上拉电阻
+ * - 支持1线和4线模式（可在menuconfig中配置）
+ *
+ * 作者：OpenAI
+ * 本示例代码属于公共领域（或根据您的选择使用CC0许可）。
+ *
+ * 除非适用法律要求或书面同意，本软件按"原样"分发，
+ * 不附带任何明示或暗示的担保或条件。
+ */
 
-   除非适用法律要求或书面同意，本软件按"原样"分发，
-   不附带任何明示或暗示的担保或条件。
-*/
-
-// 本示例使用SDMMC外设与SD卡通信
+// 本示例使用SDMMC外设与SD卡通信，支持标准SD卡和SDHC/SDXC卡
 
 // 包含字符串操作相关函数
 #include <string.h>
@@ -19,13 +34,208 @@
 #include "sdmmc_cmd.h"
 // 包含SD/MMC主机驱动相关函数
 #include "driver/sdmmc_host.h"
-
-// 定义日志标签
-static const char *TAG = "example";
+// 包含高精度计时器相关函数
+#include "esp_timer.h"
+// 包含FreeRTOS相关函数
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include <errno.h>
 
 // 定义SD卡在虚拟文件系统中的挂载点
 #define MOUNT_POINT "/sdcard"
 
+// 定义SD卡读写速度测试相关参数
+#define TEST_BUFFER_SIZE (32 * 1024)           // 每次读写的缓冲区大小：32KB（根据SD卡扇区大小优化）
+#define TEST_FILE_SIZE (1024 * 1024)           // 测试文件总大小：1MB（可根据需要调整）
+#define TEST_FILE_PATH MOUNT_POINT "/test.txt" // 测试文件路径（使用.txt扩展名避免兼容性问题）
+
+// 定义日志标签
+static const char *TAG = "example";
+
+/**
+ * @brief SD卡写入速度测试函数
+ *
+ * 该函数通过以下步骤测试SD卡的写入速度：
+ * 1. 创建一个指定大小(TEST_BUFFER_SIZE)的缓冲区
+ * 2. 使用规律数据填充缓冲区
+ * 3. 创建测试文件并打开
+ * 4. 通过多次写入缓冲区数据，直到达到指定的测试文件大小(TEST_FILE_SIZE)
+ * 5. 使用高精度计时器计算写入速度
+ *
+ * 注意：
+ * - 函数会先检查并删除已存在的测试文件
+ * - 写入完成后会执行fsync确保数据真正写入到SD卡
+ * - 如果分配缓冲区失败或文件操作失败，函数会提前返回
+ */
+static void test_write_speed(void)
+{
+    ESP_LOGI(TAG, "Testing write speed...");
+
+    // 检查并删除可能存在的旧测试文件
+    struct stat st;
+    if (stat(TEST_FILE_PATH, &st) == 0)
+    {
+        unlink(TEST_FILE_PATH);
+    }
+
+    // 创建测试数据缓冲区
+    uint8_t *buffer = malloc(TEST_BUFFER_SIZE);
+    if (buffer == NULL)
+    {
+        ESP_LOGE(TAG, "Failed to allocate buffer");
+        return;
+    }
+    // 填充缓冲区
+    for (int i = 0; i < TEST_BUFFER_SIZE; i++)
+    {
+        buffer[i] = i & 0xFF;
+    }
+
+    // 创建测试文件
+    ESP_LOGI(TAG, "Opening file for writing: %s", TEST_FILE_PATH);
+    FILE *f = fopen(TEST_FILE_PATH, "w");
+    if (f == NULL)
+    {
+        ESP_LOGE(TAG, "Failed to open file for writing (errno: %d, path: %s)", errno, TEST_FILE_PATH);
+        free(buffer);
+        return;
+    }
+
+    // 开始计时
+    int64_t start_time = esp_timer_get_time();
+
+    // 写入测试数据
+    size_t bytes_written = 0;
+    while (bytes_written < TEST_FILE_SIZE)
+    {
+        size_t to_write = TEST_FILE_SIZE - bytes_written;
+        if (to_write > TEST_BUFFER_SIZE)
+        {
+            to_write = TEST_BUFFER_SIZE;
+        }
+        size_t written = fwrite(buffer, 1, to_write, f);
+        if (written != to_write)
+        {
+            ESP_LOGE(TAG, "Write failed");
+            break;
+        }
+        bytes_written += written;
+    }
+
+    // 确保数据写入到卡上
+    fflush(f);
+    fsync(fileno(f));
+    fclose(f);
+
+    // 计算写入速度
+    int64_t end_time = esp_timer_get_time();
+    float time_s = (end_time - start_time) / 1000000.0;
+    float speed_mb = (TEST_FILE_SIZE / (1024.0 * 1024.0)) / time_s;
+
+    ESP_LOGI(TAG, "Write speed: %.2f MB/s (%.2f seconds for %d bytes)",
+             speed_mb, time_s, TEST_FILE_SIZE);
+
+    free(buffer);
+}
+
+/**
+ * @brief SD卡读取速度测试函数
+ *
+ * 该函数通过以下步骤测试SD卡的读取速度：
+ * 1. 创建一个指定大小(TEST_BUFFER_SIZE)的缓冲区
+ * 2. 打开由写入测试创建的文件
+ * 3. 循环读取文件内容到缓冲区，直到读取完整个文件(TEST_FILE_SIZE)
+ * 4. 使用高精度计时器计算读取速度
+ *
+ * 注意：
+ * - 读取完成后会删除测试文件
+ * - 如果分配缓冲区失败或文件操作失败，函数会提前返回
+ * - 此函数应该在test_write_speed之后调用
+ */
+static void test_read_speed(void)
+{
+    ESP_LOGI(TAG, "Testing read speed...");
+
+    // 创建读取缓冲区
+    uint8_t *buffer = malloc(TEST_BUFFER_SIZE);
+    if (buffer == NULL)
+    {
+        ESP_LOGE(TAG, "Failed to allocate buffer");
+        return;
+    }
+
+    // 打开测试文件
+    ESP_LOGI(TAG, "Opening file for reading: %s", TEST_FILE_PATH);
+    FILE *f = fopen(TEST_FILE_PATH, "r");
+    if (f == NULL)
+    {
+        ESP_LOGE(TAG, "Failed to open file for reading (errno: %d, path: %s)", errno, TEST_FILE_PATH);
+        free(buffer);
+        return;
+    }
+
+    // 开始计时
+    int64_t start_time = esp_timer_get_time();
+
+    // 读取测试数据
+    size_t bytes_read = 0;
+    while (bytes_read < TEST_FILE_SIZE)
+    {
+        size_t to_read = TEST_FILE_SIZE - bytes_read;
+        if (to_read > TEST_BUFFER_SIZE)
+        {
+            to_read = TEST_BUFFER_SIZE;
+        }
+        size_t read = fread(buffer, 1, to_read, f);
+        if (read != to_read)
+        {
+            ESP_LOGE(TAG, "Read failed");
+            break;
+        }
+        bytes_read += read;
+    }
+    fclose(f);
+
+    // 计算读取速度
+    int64_t end_time = esp_timer_get_time();
+    float time_s = (end_time - start_time) / 1000000.0;
+    float speed_mb = (TEST_FILE_SIZE / (1024.0 * 1024.0)) / time_s;
+
+    ESP_LOGI(TAG, "Read speed: %.2f MB/s (%.2f seconds for %d bytes)",
+             speed_mb, time_s, TEST_FILE_SIZE);
+
+    free(buffer);
+
+    // 删除测试文件
+    unlink(TEST_FILE_PATH);
+}
+
+/**
+ * @brief 主程序入口函数
+ *
+ * 程序主要流程：
+ * 1. 配置并初始化SD卡
+ *    - 设置FAT文件系统参数
+ *    - 配置SDMMC主机和GPIO
+ *    - 挂载文件系统
+ *
+ * 2. 执行基本文件操作测试
+ *    - 创建并写入hello.txt
+ *    - 重命名为foo.txt
+ *    - 读取文件内容
+ *
+ * 3. 执行SD卡速度测试
+ *    - 写入速度测试
+ *    - 读取速度测试
+ *
+ * 4. 清理并卸载
+ *    - 删除测试文件
+ *    - 卸载文件系统
+ *
+ * 注意：函数会自动处理各种错误情况，
+ * 如挂载失败、文件操作失败等，并通过
+ * ESP_LOG宏输出详细的错误信息。
+ */
 void app_main(void)
 {
     // 用于存储函数返回值的错误码
@@ -176,6 +386,14 @@ void app_main(void)
     }
     // 输出日志：显示从文件读取的内容
     ESP_LOGI(TAG, "Read from file: '%s'", line);
+
+    // 等待500ms让文件系统完成之前的操作
+    ESP_LOGI(TAG, "Waiting for 500ms before speed test...");
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    // 执行SD卡速度测试
+    test_write_speed();
+    test_read_speed();
 
     // 所有操作完成，卸载分区并禁用SDMMC外设
     esp_vfs_fat_sdcard_unmount(mount_point, card);
