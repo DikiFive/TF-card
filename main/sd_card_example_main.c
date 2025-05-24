@@ -156,8 +156,8 @@ static void test_read_speed(void)
 {
     ESP_LOGI(TAG, "Testing read speed...");
 
-    // 创建读取缓冲区
-    uint8_t *buffer = malloc(TEST_BUFFER_SIZE);
+    // 创建DMA兼容的读取缓冲区
+    uint8_t *buffer = heap_caps_malloc(TEST_BUFFER_SIZE, MALLOC_CAP_DMA);
     if (buffer == NULL)
     {
         ESP_LOGE(TAG, "Failed to allocate buffer");
@@ -181,13 +181,6 @@ static void test_read_speed(void)
     size_t bytes_read = 0;
     while (bytes_read < TEST_FILE_SIZE)
     {
-        // 设置文件位置以确保不使用缓存数据
-        if (fseek(f, bytes_read, SEEK_SET) != 0)
-        {
-            ESP_LOGE(TAG, "Seek failed with error %d", errno);
-            break;
-        }
-
         size_t to_read = TEST_FILE_SIZE - bytes_read;
         if (to_read > TEST_BUFFER_SIZE)
         {
@@ -197,6 +190,8 @@ static void test_read_speed(void)
         size_t read = fread(buffer, 1, to_read, f);
         if (read != to_read)
         {
+            ESP_LOGE(TAG, "Read partial/failed: read=%d, expected=%d, bytes_read_total=%d, ferror=%d, feof=%d",
+                     (int)read, (int)to_read, (int)bytes_read, ferror(f), feof(f));
             if (ferror(f))
             {
                 ESP_LOGE(TAG, "Read failed with error %d", errno);
@@ -207,6 +202,8 @@ static void test_read_speed(void)
             }
             break;
         }
+        // 每次成功读取后，打印进度
+        ESP_LOGD(TAG, "Read %d bytes, total %d/%d", (int)read, (int)bytes_read + (int)read, (int)TEST_FILE_SIZE);
         bytes_read += read;
     }
     fclose(f);
@@ -403,8 +400,6 @@ void app_main(void)
     // 执行SD卡速度测试
     test_write_speed();
     test_read_speed();
-
-    // 所有操作完成，卸载分区并禁用SDMMC外设
     esp_vfs_fat_sdcard_unmount(mount_point, card);
     // 输出日志：SD卡已卸载
     ESP_LOGI(TAG, "Card unmounted");
